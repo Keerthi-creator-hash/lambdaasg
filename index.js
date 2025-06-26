@@ -43,6 +43,7 @@ exports.handler = async (event, context) => {
                 continue;
             }
 
+            // Get launch template version data
             const templateRes = await ec2.describeLaunchTemplateVersions(params).promise();
             const imageId = templateRes.LaunchTemplateVersions?.[0]?.LaunchTemplateData?.ImageId;
 
@@ -51,14 +52,18 @@ exports.handler = async (event, context) => {
                 continue;
             }
 
+            // Get the original AMI name
             const imageDetails = await ec2.describeImages({
                 ImageIds: [imageId]
             }).promise();
 
-            const originalName = imageDetails.Images?.[0]?.Name;
+            const originalName = imageDetails.Images?.[0]?.Name;     
             const now = new Date();
-            const today = now.toISOString().split('T')[0]; 
-            const time = now.toISOString().split('T')[1].split('.')[0].replace(/:/g, '-'); 
+            const today = now.toISOString().split('T')[0]; // e.g., "2025-06-24"
+            const time = now.toISOString().split('T')[1].split('.')[0].replace(/:/g, '-'); // e.g., "14-52-36"
+            const cutoff = new Date(now.getTime() - 5 * 60 * 1000); 
+
+
             const amiName = `${originalName}-${today}-${time}`;
 
 
@@ -72,7 +77,30 @@ exports.handler = async (event, context) => {
                 Description: `Copied from ASG ${asgName} (AMI: ${imageId})`
             }).promise();
 
+
             console.log(`Copied AMI to ${TARGET_REGION}: ${copyImageRes.ImageId}`);
+            console.log(` Copied AMI to ${TARGET_REGION}: ${copyImageRes.ImageId}`);
+
+            const prefix = `${originalName}-`;
+            const oldImages = await ec2TargetRegion.describeImages({
+                Owners: ['self'],
+                Filters: [
+                    {
+                        Name: 'name',
+                        Values: [`${prefix}*`]
+                    }
+                ]
+            }).promise();
+
+            for (const image of oldImages.Images) {
+                const creationDate = new Date(image.CreationDate);
+                if (creationDate < cutoff) {
+                    console.log(` Deregistering old AMI: ${image.ImageId} (${image.Name})`);
+                    await ec2TargetRegion.deregisterImage({
+                        ImageId: image.ImageId
+                    }).promise();
+                }
+            }
         } catch (err) {
             console.error(`Failed to process ASG ${asgName}: ${err.message}`);
         }
