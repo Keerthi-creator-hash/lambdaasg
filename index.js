@@ -32,20 +32,9 @@ const {
       const instanceId = asgRes.AutoScalingGroups?.[0]?.Instances?.find(i => i.LifecycleState === "InService")?.InstanceId;
       if (!instanceId) throw new Error("No running instance found in ASG");
   
-      // Step 2: Get original AMI ID and name
-      const instanceData = await ec2.send(
-        new DescribeInstancesCommand({ InstanceIds: [instanceId] })
-      );
-      const sourceAmi = instanceData.Reservations?.[0]?.Instances?.[0]?.ImageId;
-  
-      const amiDetails = await ec2.send(
-        new DescribeImagesCommand({ ImageIds: [sourceAmi] })
-      );
-      const originalAmiName = amiDetails.Images?.[0]?.Name || `ASG-AMI-${getTodayDate()}`;
-  
-      // Step 3: Create new AMI
+      // Step 2: Create new AMI from instance
       const dateTag = getTodayDate();
-      const backupAmiName = `${originalAmiName}-Backup-${dateTag}`;
+      const backupAmiName = `${ASG_NAME}-Backup-${dateTag}`;
   
       const createRes = await ec2.send(new CreateImageCommand({
         InstanceId: instanceId,
@@ -60,19 +49,19 @@ const {
         }]
       }));
       const newAmiId = createRes.ImageId;
-      console.log(" Created AMI:", newAmiId);
+      console.log("Created AMI:", newAmiId);
   
-      // Step 4: Wait until AMI is available
+      // Step 3: Wait until AMI is available
       let state = "pending";
       while (state !== "available") {
         await new Promise(res => setTimeout(res, 15000));
         const res = await ec2.send(new DescribeImagesCommand({ ImageIds: [newAmiId] }));
         state = res.Images?.[0]?.State;
-        console.log(`⏳ Waiting... AMI state: ${state}`);
+        console.log(` Waiting... AMI state: ${state}`);
       }
   
-      // Step 5: Copy AMI to target region
-      const copyAmiName = `${originalAmiName}-Copy-${dateTag}`;
+      // Step 4: Copy AMI to target region
+      const copyAmiName = `${ASG_NAME}-Copy-${dateTag}`;
       const copyRes = await ec2Target.send(new CopyImageCommand({
         SourceImageId: newAmiId,
         SourceRegion: REGION,
@@ -88,13 +77,13 @@ const {
       }));
       console.log("Copied AMI to target region:", copyRes.ImageId);
   
-      // Step 6: Delete the source AMI and its snapshots
+      // Step 5: Delete the created AMI and its snapshots in source region
       const createdAmiDetails = await ec2.send(new DescribeImagesCommand({ ImageIds: [newAmiId] }));
       const snapshotsToDelete = createdAmiDetails.Images?.[0]?.BlockDeviceMappings?.map(
         d => d.Ebs?.SnapshotId
       ).filter(Boolean) || [];
   
-      console.log(` Deregistering source AMI: ${newAmiId}`);
+      console.log(`Deregistering source AMI: ${newAmiId}`);
       await ec2.send(new DeregisterImageCommand({ ImageId: newAmiId }));
   
       for (const snapId of snapshotsToDelete) {
@@ -102,7 +91,7 @@ const {
         await ec2.send(new DeleteSnapshotCommand({ SnapshotId: snapId }));
       }
   
-      //  Step 7 – Cleanup: Delete copied AMIs older than 7 days in target region
+      // Step 6: Cleanup AMIs older than 7 days in target region
       const { Images = [] } = await ec2Target.send(new DescribeImagesCommand({
         Owners: ['self'],
         Filters: [
@@ -123,7 +112,7 @@ const {
   
           const snapIds = image.BlockDeviceMappings?.map(b => b.Ebs?.SnapshotId).filter(Boolean);
           for (const snapId of snapIds) {
-            console.log(` Deleting snapshot in target region: ${snapId}`);
+            console.log(`Deleting snapshot in target region: ${snapId}`);
             await ec2Target.send(new DeleteSnapshotCommand({ SnapshotId: snapId }));
           }
         } else {
@@ -133,7 +122,7 @@ const {
   
       return {
         statusCode: 200,
-        body: ` AMI ${newAmiId} created, copied, original deleted, and old AMIs (7+ days) cleaned from target region.`
+        body: ` AMI ${newAmiId} created, copied, source deleted, and old AMIs cleaned from target region.`
       };
   
     } catch (err) {
@@ -144,4 +133,3 @@ const {
       };
     }
   };
-  
